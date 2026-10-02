@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+# rust-toolchain.toml selects the `stable` channel, but that does not update the runner
+# image's preinstalled (possibly older) stable. So every job first runs
+# `rustup update stable` (always the latest stable rustc, nothing cached), then
+# `rustup toolchain install` adds that file's components and targets.
+# ponytail: no cargo cache; the dependency tree is small enough to build from scratch.
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: |
+          rustup update --no-self-update stable
+          rustup toolchain install --no-self-update
+          rustc --version
+      - run: cargo fmt --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: |
+          rustup update --no-self-update stable
+          rustup toolchain install --no-self-update
+          rustc --version
+      - run: cargo clippy --locked --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: |
+          rustup update --no-self-update stable
+          rustup toolchain install --no-self-update
+          rustc --version
+      # Unprivileged: mark_linux's marking_failure_rejects_requests exercises the
+      # "cannot set SO_MARK => request rejected" path here.
+      - run: cargo test --locked
+      # Keep the benchmark compiling; it is informational and never run as a gate.
+      - run: cargo bench --locked --no-run
+
+  mark-privileged:
+    # The SO_MARK proofs need CAP_NET_ADMIN, so only the test binary runs under sudo
+    # (cargo itself and the target/ dir stay owned by the runner user). Equivalent to
+    # `sudo -E cargo test --locked --test mark_linux -- --ignored`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: |
+          rustup update --no-self-update stable
+          rustup toolchain install --no-self-update
+          rustc --version
+      - run: cargo test --locked --test mark_linux -- --ignored
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
+
+  musl-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in sync with release.yml's binaries matrix.
+        target:
+          - aarch64-unknown-linux-musl
+          - x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: |
+          rustup update --no-self-update stable
+          rustup toolchain install --no-self-update
+          rustup target add "${{ matrix.target }}"
+          rustc --version
+      # Latest prebuilt zig (minisign-verified by the action) + latest prebuilt
+      # cargo-zigbuild (release binary, SHA-256 checked; no source-build fallback).
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: latest
+          use-cache: false
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+          fallback: none
+      - run: cargo zigbuild --locked --release --target "${{ matrix.target }}"
+      - name: Check the binary is static
+        run: |
+          file "target/${{ matrix.target }}/release/marksocks" | tee /dev/stderr \
+            | grep -Eq 'statically linked|static-pie linked'
+
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: OpenWrt config.toml matches config.example.toml
+        run: cmp config.example.toml openwrt/marksocks/files/config.toml
+      - name: Package version matches Cargo.toml
+        run: |
+          cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          pkg_version=$(sed -n 's/^PKG_VERSION:=//p' openwrt/marksocks/Makefile)
+          echo "Cargo.toml: $cargo_version, openwrt/marksocks/Makefile: $pkg_version"
+          [ "$cargo_version" = "$pkg_version" ]
+      # rc.common provides USE_PROCD/START and the procd_*/uci_* helpers, hence:
+      # SC2034 (variables used by rc.common), SC2154 ($enabled/$config_file are set by
+      # uci_load_validate), SC3043 (`local` is supported by OpenWrt's ash).
+      - name: shellcheck init script
+        run: shellcheck -s sh -e SC2034,SC2154,SC3043 openwrt/marksocks/files/marksocks.init

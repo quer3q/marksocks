@@ -1,0 +1,30 @@
+[package]
+name = "marksocks"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Small SOCKS5 proxy for OpenWrt that sets SO_MARK on destination-facing sockets"
+repository = "https://github.com/quer3q/marksocks"
+readme = "README.md"
+
+[dependencies]
+fast-socks5 = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros", "signal", "io-util", "sync"] }
+socket2 = { version = "0.6", features = ["all"] }
+log = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+toml = { version = "0.9", default-features = false, features = ["std", "parse", "serde"] }
+# ponytail: no default features (regex/colors/timestamps) — procd/logd adds timestamps; keeps the router binary small.
+env_logger = { version = "0.11", default-features = false }
+
+[[bench]]
+name = "relay"
+path = "bench/relay.rs"
+harness = false
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1

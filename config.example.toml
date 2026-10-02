@@ -1,0 +1,60 @@
+# marksocks configuration (TOML). Every key is optional; the values below are the
+# defaults, so an empty file behaves exactly like this one.
+#
+# Default path: /etc/marksocks/config.toml (override with `marksocks --config <path>`).
+# Validate with `marksocks --config <path> --check`.
+# If you enable [auth], keep this file private: chmod 600.
+# Unknown keys are rejected, so typos fail validation instead of being ignored.
+
+# Address and port to accept SOCKS5 clients on. The default is loopback only. For LAN
+# access set the router's LAN IP (e.g. "192.168.1.1:1080") or "0.0.0.0:1080" for all
+# interfaces, and restrict access with the firewall (on OpenWrt, fw4 rejects WAN input by
+# default; consider [auth] too).
+listen = "127.0.0.1:1080"
+
+# off, error, warn, info, debug or trace. "off" logs nothing (startup errors still go to
+# stderr). Credentials and payloads are never logged at any level.
+log_level = "off"
+
+# SO_MARK for destination-facing sockets (outbound TCP and UDP). Decimal or hex, non-zero.
+# Absent = marking disabled. When set, a request whose socket cannot be marked (e.g. no
+# CAP_NET_ADMIN, or a non-Linux build) is rejected; traffic is never sent unmarked.
+# mark = 0x10000000
+
+# Seconds a client may take to finish method negotiation, auth and its request. 0 = no limit.
+handshake_timeout = 10
+
+# Seconds without traffic in either direction before a relay is closed. 0 = no limit.
+idle_timeout = 300
+
+# Maximum concurrent client connections; extra clients are closed immediately. 0 = no limit.
+max_connections = 512
+
+# --- Settings inherited from fast-socks5's server Config (same names) ---
+# Defaults match fast-socks5 except allow_udp and nodelay (both true here, false there).
+
+# Seconds for DNS resolution plus all connection attempts to a destination.
+request_timeout = 10
+
+# true = skip SOCKS5 method negotiation entirely (not RFC compliant; for private clients
+# that send the request immediately). Cannot be combined with [auth].
+skip_auth = false
+
+# true = resolve domain destinations on the router (every resolved address is tried in
+# order). false = domain destinations are rejected with "address type not supported".
+dns_resolve = true
+
+# true = accept UDP ASSOCIATE. false = reply "command not supported".
+allow_udp = true
+
+# With [auth] set: also accept clients that offer only "no authentication".
+allow_no_auth = false
+
+# Disable Nagle's algorithm on client and outbound TCP sockets.
+nodelay = true
+
+# Username/password authentication (RFC 1929). Both keys required, 1..=255 bytes each.
+# Absent = no authentication.
+# [auth]
+# username = "user"
+# password = "change-me"

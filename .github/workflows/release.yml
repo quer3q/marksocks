@@ -1,0 +1,328 @@
+name: Release
+
+# A `v*` tag builds everything and publishes a GitHub Release.
+# `workflow_dispatch` is a dry run, even when started on a tag: same builds, artifacts kept on
+# the run, nothing published.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: v
+        name: Check Cargo.toml, OpenWrt Makefile and tag agree
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          pkg_version=$(sed -n 's/^PKG_VERSION:=//p' openwrt/marksocks/Makefile)
+          if [ "$pkg_version" != "$version" ]; then
+            echo "::error::Cargo.toml version $version != openwrt/marksocks/Makefile PKG_VERSION $pkg_version"
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  binaries:
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Static musl targets. Adding one is one line here (and in ci.yml's musl-build).
+        # A built binary is not a claim of router support: see "Supported targets" in README.
+        include:
+          - target: aarch64-unknown-linux-musl
+          - target: x86_64-unknown-linux-musl
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # The runner image ships a Rust that may be older than the current stable, and
+      # rust-toolchain.toml's `channel = "stable"` does not update it: update explicitly.
+      - name: Latest stable Rust (rust-toolchain.toml channel) + target
+        run: |
+          rustup update --no-self-update stable
+          rustup toolchain install --no-self-update
+          rustup target add "$TARGET"
+          rustc -Vv
+          rustc -V > "rustc-$TARGET.txt"
+      # cargo-zigbuild + zig rather than `cross`: zig links every musl target from this one
+      # x86_64 runner, with no per-target Docker images. Both are the latest prebuilt
+      # releases, nothing is compiled from source: setup-zig verifies the zig tarball's
+      # minisign signature, install-action downloads cargo-zigbuild's release binary and
+      # checks its SHA-256 (`fallback: none` forbids a cargo install/binstall fallback).
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: latest
+          use-cache: false
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+          fallback: none
+      - run: cargo zigbuild --locked --release --target "$TARGET"
+      - name: Package
+        run: |
+          bin="target/$TARGET/release/marksocks"
+          file "$bin" | tee /dev/stderr | grep -Eq 'statically linked|static-pie linked'
+          name="marksocks-$VERSION-$TARGET"
+          mkdir -p "dist/$name/openwrt"
+          cp "$bin" LICENSE README.md config.example.toml "dist/$name/"
+          cp openwrt/marksocks/files/* "dist/$name/openwrt/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+      # Provenance for the release notes (not a release asset).
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rustc-${{ matrix.target }}
+          path: rustc-${{ matrix.target }}.txt
+          if-no-files-found: error
+
+  openwrt:
+    # The OpenWrt package for one OpenWrt release + target, built with that release's
+    # prebuilt SDK, with this checkout added as a feed. Nothing is compiled here: the SDK
+    # only packages the static musl binary the `binaries` job built with the latest stable
+    # Rust (MARKSOCKS_PREBUILT, see openwrt/marksocks/Makefile), so no rust/host and no
+    # packages feed. On a tag push it also signs an apk repository index (packages.adb)
+    # that lists only marksocks. `arch` is the package architecture the SDK produces. apk
+    # only (OpenWrt >= 25.12): an ipk feed for 24.10 and older would need usign-signed
+    # Packages instead.
+    name: openwrt ${{ matrix.version }} ${{ matrix.target }}/${{ matrix.subtarget }} ${{ matrix.arch }}
+    needs: [version, binaries]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { version: 25.12.5, target: rockchip, subtarget: armv8, arch: aarch64_generic }
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      ARCH: ${{ matrix.arch }}
+      SDK_URL: https://downloads.openwrt.org/releases/${{ matrix.version }}/targets/${{ matrix.target }}/${{ matrix.subtarget }}
+    steps:
+      # The checkout (the feed) and the SDK sit side by side: scripts/feeds scans the feed
+      # recursively, so the SDK must not be inside the checkout it links to.
+      - uses: actions/checkout@v7
+        with:
+          path: marksocks
+          persist-credentials: false
+      # Only a release tag push signs. A manual run can build any branch, so it never
+      # gets the secrets: the step-level `if` skips these steps, env included. The secrets
+      # reach only these two steps, never the package build (it runs third-party build
+      # scripts). The check runs first, to fail before the hours-long build. The
+      # published marksocks.pem is APK_PUBLIC_KEY as stored in the secret.
+      - name: Unsigned dry run
+        if: ${{ !(github.event_name == 'push' && github.ref_type == 'tag') }}
+        run: |
+          echo "::notice::not a release tag push: the .apk is built without the signed index (packages.adb); nothing signed is uploaded"
+      - name: Check the apk signing secrets
+        id: key
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          APK_SIGNING_KEY: ${{ secrets.APK_SIGNING_KEY }}
+          APK_PUBLIC_KEY: ${{ secrets.APK_PUBLIC_KEY }}
+        run: |
+          if [ -z "$APK_SIGNING_KEY" ] || [ -z "$APK_PUBLIC_KEY" ]; then
+            echo "::error::a release needs the repository secrets APK_SIGNING_KEY and APK_PUBLIC_KEY (see README, Maintainers)"
+            exit 1
+          fi
+          # The two must be one pair: compare canonical public key PEMs (the derived one
+          # is only used for this comparison). printf is a builtin: the key never shows
+          # up in a process list, a file or the log.
+          signing=$(printf '%s\n' "$APK_SIGNING_KEY" | openssl pkey -pubout) && [ -n "$signing" ] \
+            || { echo "::error::APK_SIGNING_KEY is not an unencrypted private key PEM"; exit 1; }
+          public=$(printf '%s\n' "$APK_PUBLIC_KEY" | openssl pkey -pubin -pubout) && [ -n "$public" ] \
+            || { echo "::error::APK_PUBLIC_KEY is not a public key PEM"; exit 1; }
+          if [ "$signing" != "$public" ]; then
+            echo "::error::APK_PUBLIC_KEY is not the public key of APK_SIGNING_KEY"
+            exit 1
+          fi
+          echo signed=true >> "$GITHUB_OUTPUT"
+      - name: Rust target for the package arch
+        id: rust
+        run: |
+          case "$ARCH" in
+            aarch64_*) target=aarch64-unknown-linux-musl ;;
+            x86_64) target=x86_64-unknown-linux-musl ;;
+            *) echo "::error::no Rust target for OpenWrt package arch $ARCH: add it to this mapping and to the binaries matrix"; exit 1 ;;
+          esac
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+      # Fails the job if the binaries job produced no artifact for this target.
+      - uses: actions/download-artifact@v8
+        with:
+          name: binary-${{ steps.rust.outputs.target }}
+          path: prebuilt
+      - name: Unpack the binary (latest stable Rust, from the binaries job)
+        env:
+          TARGET: ${{ steps.rust.outputs.target }}
+        run: |
+          tar -xzf "prebuilt/marksocks-$VERSION-$TARGET.tar.gz" -C prebuilt
+          bin="$GITHUB_WORKSPACE/prebuilt/marksocks-$VERSION-$TARGET/marksocks"
+          [ -f "$bin" ] || { echo "::error::$bin missing from the binary-$TARGET artifact"; exit 1; }
+          file "$bin" | tee /dev/stderr | grep -Eq 'statically linked|static-pie linked'
+          echo "MARKSOCKS_PREBUILT=$bin" >> "$GITHUB_ENV"
+      - name: Install SDK build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential file gawk gettext git libncurses-dev libssl-dev python3 rsync \
+            unzip wget zlib1g-dev zstd
+      - name: Download and verify the SDK
+        run: |
+          curl -sSfL --retry 5 -o sha256sums "$SDK_URL/sha256sums"
+          # The SDK file name embeds the gcc version, so take it from the release's own list.
+          sdk=$(grep -oE 'openwrt-sdk-[^ ]*\.Linux-x86_64\.tar\.zst$' sha256sums | sed 's/^\*//')
+          [ "$(printf '%s\n' "$sdk" | grep -c .)" = 1 ] || { echo "::error::SDK not found in sha256sums"; exit 1; }
+          curl -sSfL --retry 5 -o "$sdk" "$SDK_URL/$sdk"
+          grep -F " *$sdk" sha256sums | sha256sum -c -
+          mkdir sdk
+          tar --zstd -xf "$sdk" -C sdk --strip-components=1
+          rm "$sdk"
+      - name: Feeds (only this checkout, as the marksocks feed)
+        working-directory: sdk
+        # MARKSOCKS_PREBUILT (set above) is already in the environment here: it drops the
+        # rust dependency from the package metadata, so no other feed is needed.
+        run: |
+          echo "src-link marksocks $GITHUB_WORKSPACE/marksocks" > feeds.conf
+          ./scripts/feeds update -a
+          ./scripts/feeds install marksocks
+      - name: Build (package the prebuilt binary)
+        working-directory: sdk
+        run: |
+          echo CONFIG_PACKAGE_marksocks=m >> .config
+          make defconfig
+          if grep -E 'marksocks/compile.*rust' tmp/.packagedeps; then
+            echo "::error::marksocks depends on the SDK's rust/host: MARKSOCKS_PREBUILT was not applied"
+            exit 1
+          fi
+          make -j"$(nproc)" package/marksocks/compile V=s
+      # The SDK signs apk indexes, not packages: package/Makefile's `package/index` runs
+      # `apk mkndx --sign private-key.pem` (rules.mk BUILD_KEY_APK_SEC, SDK top dir) per
+      # bin/packages/<arch>/<feed> when CONFIG_SIGNED_PACKAGES=y (the default). The compile
+      # step above generated a throwaway private-key.pem; the real key replaces it only
+      # here, and is deleted again when this step ends. marksocks.pem (the release asset)
+      # is written from APK_PUBLIC_KEY and must verify the new index.
+      - name: Sign the package index (packages.adb)
+        if: github.event_name == 'push' && github.ref_type == 'tag' && steps.key.outputs.signed == 'true'
+        working-directory: sdk
+        env:
+          APK_SIGNING_KEY: ${{ secrets.APK_SIGNING_KEY }}
+          APK_PUBLIC_KEY: ${{ secrets.APK_PUBLIC_KEY }}
+        run: |
+          trap 'rm -f private-key.pem' EXIT
+          grep -qx CONFIG_SIGNED_PACKAGES=y .config || { echo "::error::CONFIG_SIGNED_PACKAGES is off"; exit 1; }
+          (umask 077 && printf '%s\n' "$APK_SIGNING_KEY" > private-key.pem)
+          printf '%s\n' "$APK_PUBLIC_KEY" > marksocks.pem
+          make package/index V=s
+          # The marksocks feed's index must list marksocks only, and verify with the
+          # published marksocks.pem alone (fails on a missing or foreign signature).
+          d="bin/packages/$ARCH/marksocks"
+          cat "$d/index.json"
+          jq -e '.packages | keys == ["marksocks"]' "$d/index.json"
+          mkdir -p /tmp/apk-keys && cp marksocks.pem /tmp/apk-keys/marksocks.pem
+          staging_dir/host/bin/apk verify --keys-dir /tmp/apk-keys "$d/packages.adb"
+      - name: Collect the package (and the signed index)
+        env:
+          SIGNED: ${{ steps.key.outputs.signed }}
+        run: |
+          d="sdk/bin/packages/$ARCH/marksocks"
+          set -- "$d"/marksocks-*.apk
+          [ "$#" = 1 ] && [ -f "$1" ] || { echo "::error::expected one marksocks .apk in $d, got: $*"; exit 1; }
+          mkdir dist
+          # Native file name (marksocks-<version>-r<release>.apk): the index refers to it
+          # by that name, and so does the ImageBuilder's packages/ directory.
+          cp "$1" dist/
+          if [ "$SIGNED" = true ]; then
+            cp "$d/packages.adb" dist/
+            cp sdk/marksocks.pem dist/marksocks.pem   # APK_PUBLIC_KEY, written by the sign step
+            cat dist/marksocks.pem
+            # The fingerprint users check: SHA-256 of the bytes of the marksocks.pem asset,
+            # i.e. `sha256sum marksocks.pem` (OpenWrt has sha256sum, not openssl).
+            echo "marksocks.pem SHA-256 (of the file's bytes): $(sha256sum < dist/marksocks.pem | cut -d' ' -f1)"
+          fi
+          ls -l dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: openwrt-${{ matrix.version }}-${{ matrix.target }}-${{ matrix.subtarget }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+      - name: Remove the signing key
+        if: always()
+        run: rm -f sdk/private-key.pem
+
+  publish:
+    needs: [version, binaries, openwrt]
+    # Only a real tag push publishes; a workflow_dispatch run (even on a tag) stays a dry run.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: binary-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: openwrt-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: rustc-*
+          path: provenance
+          merge-multiple: true
+      - name: Add service/config examples and checksums
+        run: |
+          for f in packages.adb marksocks.pem; do
+            [ -f "dist/$f" ] || { echo "::error::dist/$f missing: the signed apk repository is incomplete"; exit 1; }
+          done
+          cp config.example.toml dist/
+          cp openwrt/marksocks/files/marksocks.init dist/marksocks.init
+          cp openwrt/marksocks/files/marksocks.config dist/marksocks.uci
+          cd dist
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+      # gh is preinstalled on the runner; no third-party release action needed.
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        # The apk repository URL is .../releases/latest/download/packages.adb, so this
+        # release becomes that repository as soon as GitHub marks it Latest.
+        run: |
+          fp=$(sha256sum < dist/marksocks.pem | cut -d' ' -f1)
+          rustc=$(sort -u provenance/rustc-*.txt | paste -sd ';' -)
+          echo "built with: $rustc"
+          echo "marksocks.pem SHA-256 (of the file's bytes): $fp"
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag --title "marksocks $GITHUB_REF_NAME" \
+            --notes "Static musl binaries, the OpenWrt package with its signed apk index (packages.adb), the index signing public key marksocks.pem (SHA-256 of the file's bytes: $fp; on the router, 'sha256sum /etc/apk/keys/marksocks.pem' must print it), service/config examples and SHA256SUMS. See README.md for install steps.
+          Built with $rustc (latest stable at release time; the OpenWrt package contains the same musl binary)."
