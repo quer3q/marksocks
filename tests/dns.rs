@@ -4,6 +4,7 @@
 mod common;
 
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use common::*;
@@ -79,6 +80,42 @@ async fn truncated_answer_is_retried_over_tcp() {
     .await;
     let got = resolve(&domain("big.test", 53), &cfg).await.unwrap();
     assert_eq!(got, addrs(&["203.0.113.9:53"]));
+}
+
+#[tokio::test]
+async fn answers_are_cached_per_dns_cache_size() {
+    let zone = vec![
+        ("cached.test", Rr::A([192, 0, 2, 3])),
+        ("gone.test", Rr::NxDomain),
+    ];
+    let (server, queries) = fake_dns_counting(zone.clone()).await;
+    let cfg = Config {
+        dns: Some(server),
+        ..config()
+    };
+    for name in ["cached.test", "CACHED.test.", "cached.test"] {
+        let got = resolve(&domain(name, 80), &cfg).await.unwrap();
+        assert_eq!(got, addrs(&["192.0.2.3:80"]));
+    }
+    assert_eq!(queries.load(Ordering::SeqCst), 1);
+    for _ in 0..2 {
+        assert!(resolve(&domain("gone.test", 80), &cfg).await.is_err());
+    }
+    assert_eq!(queries.load(Ordering::SeqCst), 3, "NXDOMAIN is not cached");
+
+    // cached.test is cached by now; size 0 must not read it.
+    let cfg = Config {
+        dns_cache_size: 0,
+        ..cfg
+    };
+    for _ in 0..2 {
+        resolve(&domain("cached.test", 80), &cfg).await.unwrap();
+    }
+    assert_eq!(
+        queries.load(Ordering::SeqCst),
+        5,
+        "dns_cache_size = 0 disables the cache"
+    );
 }
 
 #[tokio::test]

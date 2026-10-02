@@ -208,7 +208,7 @@ To pin a release instead of following `main`, pin the commit its tag points to.
 can. This replaces the `marksocks` line added above (a feed name may appear only once):
 
 ```sh
-v=0.0.2
+v=0.0.3
 sha=$(git ls-remote https://github.com/quer3q/marksocks.git "refs/tags/v$v" "refs/tags/v$v^{}" | tail -n1 | cut -f1)
 sed -i "s|^src-git marksocks .*|src-git marksocks https://github.com/quer3q/marksocks.git^$sha|" feeds.conf
 ./scripts/feeds update marksocks && ./scripts/feeds install marksocks
@@ -251,7 +251,8 @@ default, with comments.
 | `handshake_timeout` | `10` | Seconds a client has for negotiation, auth and its request. `0` = no limit. |
 | `idle_timeout` | `300` | Seconds without traffic in either direction before a TCP relay or UDP association is closed. `0` = no limit. |
 | `max_connections` | `512` | Concurrent client connections. Extra clients are closed at once. `0` = no limit. |
-| `dns` | absent (system resolver) | DNS server for domain destinations, `"ip:port"`, e.g. `"127.0.0.1:5353"`. Asked for A records only (CNAME chains are followed), over UDP with a TCP retry for truncated answers, within `request_timeout`. No cache. NXDOMAIN or no A record fails like an unknown host. Unused when `dns_resolve = false`. Use it when the system resolver returns addresses that must not be used here, e.g. passwall2 FakeDNS (`198.18.x`). |
+| `dns` | absent (system resolver) | DNS server for domain destinations, `"ip:port"`, e.g. `"127.0.0.1:5353"`. Asked for A records only (CNAME chains are followed), over UDP with a TCP retry for truncated answers, within `request_timeout`. Answers are cached, see `dns_cache_size`. NXDOMAIN or no A record fails like an unknown host. Unused when `dns_resolve = false`. Use it when the system resolver returns addresses that must not be used here, e.g. passwall2 FakeDNS (`198.18.x`). |
+| `dns_cache_size` | `1024` | Resolved domain names cached: answers from `dns` for their record TTL (at most 10 minutes), system resolver answers for 60 seconds. When full, expired entries and then those expiring soonest are dropped. NXDOMAIN, empty answers and errors are not cached. `0` = no cache. |
 | `request_timeout` * | `10` | Seconds for DNS resolution plus all connection attempts to one destination. Must be >= 1. |
 | `skip_auth` * | `false` | Skip SOCKS5 method negotiation (not RFC compliant). Cannot be combined with `[auth]`. |
 | `dns_resolve` * | `true` | Resolve domain destinations on the router. `false` rejects them with "address type not supported" (TCP) or drops them (UDP). |

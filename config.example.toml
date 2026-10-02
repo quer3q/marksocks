@@ -32,9 +32,14 @@ max_connections = 512
 
 # DNS server for domain destinations, as "ip:port".
 # It is asked for A records only (IPv4; CNAME chains are followed) over UDP, with a TCP
-# retry for truncated answers, within request_timeout. No cache. Its queries are never
-# marked. Absent = the system resolver (/etc/resolv.conf). Unused when dns_resolve = false.
+# retry for truncated answers, within request_timeout. Its queries are never marked.
+# Absent = the system resolver (/etc/resolv.conf). Unused when dns_resolve = false.
 # dns = "127.0.0.1:5353"
+
+# Maximum number of resolved names cached: answers from `dns` for their record TTL (at
+# most 10 minutes), system resolver answers for 60 seconds. NXDOMAIN, empty answers and errors
+# are not cached. 0 = no cache.
+dns_cache_size = 1024
 
 # --- Settings inherited from fast-socks5's server Config (same names) ---
 # Defaults match fast-socks5 except allow_udp and nodelay (both true here, false there).

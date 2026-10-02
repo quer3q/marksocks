@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "marksocks"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "env_logger",
  "fast-socks5",

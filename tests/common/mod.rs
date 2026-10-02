@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -233,14 +234,30 @@ pub enum Rr {
 /// A fake recursive DNS server on loopback (UDP and TCP, same port) serving `zone`. Answers
 /// follow CNAMEs within the zone, like a real resolver; the first owner name is compressed.
 pub async fn fake_dns(zone: Vec<(&'static str, Rr)>) -> SocketAddr {
-    let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = tcp.local_addr().unwrap();
-    let udp = UdpSocket::bind(addr).await.unwrap();
+    fake_dns_counting(zone).await.0
+}
+
+/// `fake_dns`, plus the number of UDP queries it has received.
+pub async fn fake_dns_counting(zone: Vec<(&'static str, Rr)>) -> (SocketAddr, Arc<AtomicUsize>) {
+    let queries = Arc::new(AtomicUsize::new(0));
+    let counter = queries.clone();
+    // A free TCP port may be taken for UDP (other tests bind UDP in parallel): retry.
+    let (tcp, udp, addr) = 'bind: {
+        for _ in 0..100 {
+            let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = tcp.local_addr().unwrap();
+            if let Ok(udp) = UdpSocket::bind(addr).await {
+                break 'bind (tcp, udp, addr);
+            }
+        }
+        panic!("no port free for both TCP and UDP");
+    };
     let zone = Arc::new(zone);
     let z = zone.clone();
     tokio::spawn(async move {
         let mut buf = vec![0u8; 512];
         while let Ok((n, src)) = udp.recv_from(&mut buf).await {
+            counter.fetch_add(1, Ordering::SeqCst);
             if let Some(answer) = dns_answer(&z, &buf[..n], false) {
                 let _ = udp.send_to(&answer, src).await;
             }
@@ -260,7 +277,7 @@ pub async fn fake_dns(zone: Vec<(&'static str, Rr)>) -> SocketAddr {
             });
         }
     });
-    addr
+    (addr, queries)
 }
 
 fn dns_answer(zone: &[(&str, Rr)], query: &[u8], tcp: bool) -> Option<Vec<u8>> {

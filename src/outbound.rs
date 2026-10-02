@@ -14,6 +14,9 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 use tokio::time::{timeout_at, Instant};
 
+// ponytail: the system resolver gives no TTL, so its answers are cached for a fixed time.
+const SYSTEM_RESOLVER_TTL: u32 = 60;
+
 use crate::{dns, Config};
 
 /// Why an outbound TCP connection could not be established.
@@ -102,32 +105,45 @@ pub async fn connect_tcp(target: &TargetAddr, cfg: &Config) -> Result<TcpStream,
 
 /// All addresses for `target`, in resolver order. Domains are looked up on the router (the
 /// system resolver, or A records from `cfg.dns` when set), bounded by `cfg.request_timeout`,
-/// and refused when `cfg.dns_resolve` is false.
+/// and refused when `cfg.dns_resolve` is false. Answers are cached (`cfg.dns_cache_size`):
+/// `dns` ones for their TTL, system resolver ones for `SYSTEM_RESOLVER_TTL`.
 pub async fn resolve(target: &TargetAddr, cfg: &Config) -> Result<Vec<SocketAddr>, ConnectError> {
     let (host, port) = match target {
         TargetAddr::Ip(addr) => return Ok(vec![*addr]),
         TargetAddr::Domain(_, _) if !cfg.dns_resolve => return Err(ConnectError::DnsDisabled),
         TargetAddr::Domain(host, port) => (host.as_str(), *port),
     };
+    // Port 0 until the end, so cached addresses serve any port. SocketAddr, not IpAddr: the
+    // system resolver can return scoped IPv6 (`fe80::1%eth0`).
+    let cache_size = cfg.dns_cache_size as usize;
     let lookup = async {
-        match (cfg.dns, host.parse::<IpAddr>()) {
-            (_, Ok(ip)) => Ok(vec![SocketAddr::new(ip, port)]),
-            (Some(server), _) => {
-                let ips = dns::lookup_a(server, host).await?;
-                Ok(ips.into_iter().map(|ip| (ip, port).into()).collect())
-            }
-            (None, _) => tokio::net::lookup_host((host, port))
-                .await
-                .map(Vec::from_iter),
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return Ok(vec![SocketAddr::new(ip, 0)]);
         }
+        if let Some(addrs) = dns::cached(cfg.dns, host).filter(|_| cache_size > 0) {
+            return Ok(addrs);
+        }
+        let (addrs, ttl): (Vec<SocketAddr>, u32) = match cfg.dns {
+            Some(server) => {
+                let (ips, ttl) = dns::lookup_a(server, host).await?;
+                (ips.into_iter().map(|ip| (ip, 0).into()).collect(), ttl)
+            }
+            None => {
+                let addrs = tokio::net::lookup_host((host, 0)).await?;
+                (addrs.collect(), SYSTEM_RESOLVER_TTL)
+            }
+        };
+        dns::remember(cfg.dns, host, &addrs, ttl, cache_size);
+        Ok(addrs)
     };
-    let addrs: Vec<SocketAddr> = match tokio::time::timeout(cfg.request_timeout, lookup).await {
+    let mut addrs = match tokio::time::timeout(cfg.request_timeout, lookup).await {
         Ok(res) => res.map_err(ConnectError::Resolve)?,
         Err(_) => return Err(ConnectError::Timeout),
     };
     if addrs.is_empty() {
         return Err(ConnectError::NoAddresses);
     }
+    addrs.iter_mut().for_each(|a| a.set_port(port));
     Ok(addrs)
 }
 
@@ -204,5 +220,18 @@ mod tests {
         let denied = || io::Error::from(io::ErrorKind::PermissionDenied);
         assert_eq!(code(ConnectError::Mark(denied())), 0x01);
         assert_eq!(code(ConnectError::Socket(denied())), 0x01);
+    }
+
+    #[tokio::test]
+    async fn system_resolver_answers_are_cached() {
+        let cfg = Config::default();
+        let got = resolve(&TargetAddr::Domain("LocalHost".into(), 80), &cfg).await;
+        assert!(got.unwrap().iter().all(|a| a.port() == 80));
+        let cached = dns::cached(None, "localhost").unwrap();
+        assert!(cached.iter().all(|a| a.port() == 0));
+        assert!(
+            dns::cached(None, "LOCALHOST.").is_some(),
+            "same key as for `dns`"
+        );
     }
 }

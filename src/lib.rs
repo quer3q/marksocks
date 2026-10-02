@@ -49,6 +49,9 @@ pub struct Config {
     /// DNS server queried (A records only, unmarked) for domain destinations; `None` uses
     /// the system resolver. Unused when `dns_resolve` is false.
     pub dns: Option<SocketAddr>,
+    /// Resolved names kept: `dns` answers for their TTL, system resolver ones for 60 s.
+    /// 0 disables the cache.
+    pub dns_cache_size: u32,
 
     // Inherited from `fast_socks5::server::Config`: same names and defaults, except
     // `allow_udp` and `nodelay`.
@@ -75,6 +78,7 @@ impl Default for Config {
             idle_timeout: Duration::from_secs(300),
             max_connections: 512,
             dns: None,
+            dns_cache_size: 1024,
             request_timeout: Duration::from_secs(10),
             skip_auth: false,
             dns_resolve: true,
@@ -210,6 +214,7 @@ mod tests {
         assert_eq!(cfg.idle_timeout, Duration::from_secs(300));
         assert_eq!(cfg.max_connections, 512);
         assert_eq!(cfg.dns, None);
+        assert_eq!(cfg.dns_cache_size, 1024);
         // fast_socks5::server::Config::default(), except allow_udp and nodelay.
         assert_eq!(cfg.request_timeout, Duration::from_secs(10));
         assert!(!cfg.skip_auth);
@@ -244,6 +249,7 @@ mod tests {
             idle_timeout = 300
             max_connections = 256
             dns = "127.0.0.1:5353"
+            dns_cache_size = 0
             request_timeout = 5
             dns_resolve = false
             allow_udp = false
@@ -263,6 +269,7 @@ mod tests {
         assert_eq!(cfg.idle_timeout, Duration::from_secs(300));
         assert_eq!(cfg.max_connections, 256);
         assert_eq!(cfg.dns, Some("127.0.0.1:5353".parse().unwrap()));
+        assert_eq!(cfg.dns_cache_size, 0);
         assert_eq!(cfg.request_timeout, Duration::from_secs(5));
         assert!(!cfg.dns_resolve && !cfg.allow_udp && cfg.allow_no_auth && !cfg.nodelay);
         let auth = cfg.auth.unwrap();
@@ -299,6 +306,7 @@ mod tests {
             "dns = \"adguard.lan:53\"",
             "dns = 5353",
             "dns = \"127.0.0.1:0\"",
+            "dns_cache_size = -1",
             "unknown_key = 1",
             "connect_timeout = 10",
             "execute_command = false",

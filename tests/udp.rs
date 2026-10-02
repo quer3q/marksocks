@@ -373,7 +373,12 @@ fn with_stuck_dns<F: std::future::Future<Output = ()>>(test: impl FnOnce() -> F)
 #[test]
 fn closing_the_control_connection_interrupts_a_datagram_in_progress() {
     with_stuck_dns(|| async {
-        let server = start(config()).await; // request_timeout 10s > WAIT
+        // request_timeout 10s > WAIT. No cache: a cached `localhost` would skip the stuck lookup.
+        let server = start(marksocks::Config {
+            dns_cache_size: 0,
+            ..config()
+        })
+        .await;
         let (echo, mut seen) = udp_echo("127.0.0.1:0").await.unwrap();
         let (ctl, relay) = udp_associate(server.addr, any4()).await;
         let c = client().await;
@@ -402,6 +407,7 @@ fn idle_timeout_interrupts_a_datagram_in_progress() {
     with_stuck_dns(|| async {
         let server = start(marksocks::Config {
             idle_timeout: Duration::from_millis(400),
+            dns_cache_size: 0, // a cached `localhost` would skip the stuck lookup
             ..config()
         })
         .await;
