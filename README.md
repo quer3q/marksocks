@@ -207,7 +207,7 @@ To pin a release instead of following `main`, pin the commit its tag points to.
 can. This replaces the `marksocks` line added above (a feed name may appear only once):
 
 ```sh
-v=0.1.0
+v=0.0.1
 sha=$(git ls-remote https://github.com/quer3q/marksocks.git "refs/tags/v$v" "refs/tags/v$v^{}" | tail -n1 | cut -f1)
 sed -i "s|^src-git marksocks .*|src-git marksocks https://github.com/quer3q/marksocks.git^$sha|" feeds.conf
 ./scripts/feeds update marksocks && ./scripts/feeds install marksocks

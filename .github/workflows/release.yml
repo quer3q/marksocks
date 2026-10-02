@@ -322,7 +322,16 @@ jobs:
           rustc=$(sort -u provenance/rustc-*.txt | paste -sd ';' -)
           echo "built with: $rustc"
           echo "marksocks.pem SHA-256 (of the file's bytes): $fp"
+          # actions/checkout leaves a tag push as a lightweight ref; fetch the annotated
+          # tag object so its message can open the release notes.
+          git fetch --depth=1 --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          {
+            git tag -l --format='%(contents)' "$GITHUB_REF_NAME"
+            echo
+            echo "---"
+            echo "Static musl binaries, the OpenWrt package with its signed apk index (packages.adb), the index signing public key marksocks.pem (SHA-256 of the file's bytes: $fp; on the router, 'sha256sum /etc/apk/keys/marksocks.pem' must print it), service/config examples and SHA256SUMS. See README.md for install steps."
+            echo
+            echo "Built with $rustc (latest stable at release time; the OpenWrt package contains the same musl binary)."
+          } > notes.md
           gh release create "$GITHUB_REF_NAME" dist/* \
-            --verify-tag --title "marksocks $GITHUB_REF_NAME" \
-            --notes "Static musl binaries, the OpenWrt package with its signed apk index (packages.adb), the index signing public key marksocks.pem (SHA-256 of the file's bytes: $fp; on the router, 'sha256sum /etc/apk/keys/marksocks.pem' must print it), service/config examples and SHA256SUMS. See README.md for install steps.
-          Built with $rustc (latest stable at release time; the OpenWrt package contains the same musl binary)."
+            --verify-tag --title "marksocks $GITHUB_REF_NAME" --notes-file notes.md
