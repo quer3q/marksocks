@@ -86,8 +86,9 @@ struct Association<'a> {
     client: Option<SocketAddr>,
     out4: Option<UdpSocket>,
     out6: Option<UdpSocket>,
-    /// Destinations the client sent to; only these may answer.
-    remotes: VecDeque<SocketAddr>,
+    /// Destinations the client sent to (`reply_key` of the resolved address, and the address
+    /// the client asked for); only these may answer.
+    remotes: VecDeque<(SocketAddr, TargetAddr)>,
     buf: Vec<u8>,
 }
 
@@ -175,11 +176,15 @@ impl Association<'_> {
                 continue;
             }
             let key = reply_key(addr);
-            if !self.remotes.contains(&key) {
-                if self.remotes.len() == MAX_REMOTES {
-                    self.remotes.pop_front();
+            // Two names on one address: the most recent one is echoed in replies.
+            match self.remotes.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, requested)) => *requested = target,
+                None => {
+                    if self.remotes.len() == MAX_REMOTES {
+                        self.remotes.pop_front();
+                    }
+                    self.remotes.push_back((key, target));
                 }
-                self.remotes.push_back(key);
             }
             return true;
         }
@@ -194,11 +199,20 @@ impl Association<'_> {
         let Some((n, src)) = sock.as_ref().and_then(|s| try_recv(s, &mut self.buf)) else {
             return false;
         };
-        let (Some(client), true) = (self.client, self.remotes.contains(&reply_key(src))) else {
+        let key = reply_key(src);
+        let (Some(client), Some((_, requested))) =
+            (self.client, self.remotes.iter().find(|(k, _)| *k == key))
+        else {
             debug!("{peer}: UDP datagram from {src} dropped: client never sent to it");
             return false;
         };
-        let mut reply = match new_udp_header(src) {
+        // Echo what the client asked for: a domain target gets its name back (clients map
+        // replies by it, e.g. to a FakeDNS address); an IP target gets the real source.
+        let header = match requested {
+            TargetAddr::Domain(..) => new_udp_header(requested.clone()),
+            TargetAddr::Ip(_) => new_udp_header(src),
+        };
+        let mut reply = match header {
             Ok(header) => header,
             Err(e) => {
                 debug!("{peer}: UDP header for {src} failed: {e}");

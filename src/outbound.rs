@@ -5,7 +5,7 @@
 
 use std::fmt;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use fast_socks5::util::target_addr::TargetAddr;
 use fast_socks5::ReplyError;
@@ -14,7 +14,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 use tokio::time::{timeout_at, Instant};
 
-use crate::Config;
+use crate::{dns, Config};
 
 /// Why an outbound TCP connection could not be established.
 #[derive(Debug)]
@@ -100,17 +100,29 @@ pub async fn connect_tcp(target: &TargetAddr, cfg: &Config) -> Result<TcpStream,
     Err(last_err)
 }
 
-/// All addresses for `target`, in resolver order. Domains are looked up on the router,
-/// bounded by `cfg.request_timeout`, and refused when `cfg.dns_resolve` is false.
+/// All addresses for `target`, in resolver order. Domains are looked up on the router (the
+/// system resolver, or A records from `cfg.dns` when set), bounded by `cfg.request_timeout`,
+/// and refused when `cfg.dns_resolve` is false.
 pub async fn resolve(target: &TargetAddr, cfg: &Config) -> Result<Vec<SocketAddr>, ConnectError> {
     let (host, port) = match target {
         TargetAddr::Ip(addr) => return Ok(vec![*addr]),
         TargetAddr::Domain(_, _) if !cfg.dns_resolve => return Err(ConnectError::DnsDisabled),
         TargetAddr::Domain(host, port) => (host.as_str(), *port),
     };
-    let lookup = tokio::net::lookup_host((host, port));
+    let lookup = async {
+        match (cfg.dns, host.parse::<IpAddr>()) {
+            (_, Ok(ip)) => Ok(vec![SocketAddr::new(ip, port)]),
+            (Some(server), _) => {
+                let ips = dns::lookup_a(server, host).await?;
+                Ok(ips.into_iter().map(|ip| (ip, port).into()).collect())
+            }
+            (None, _) => tokio::net::lookup_host((host, port))
+                .await
+                .map(Vec::from_iter),
+        }
+    };
     let addrs: Vec<SocketAddr> = match tokio::time::timeout(cfg.request_timeout, lookup).await {
-        Ok(res) => res.map_err(ConnectError::Resolve)?.collect(),
+        Ok(res) => res.map_err(ConnectError::Resolve)?,
         Err(_) => return Err(ConnectError::Timeout),
     };
     if addrs.is_empty() {

@@ -216,3 +216,116 @@ pub async fn recv_socks_udp(sock: &UdpSocket, wait: Duration) -> Option<(TargetA
     assert_eq!(frag, 0);
     Some((src, payload.to_vec()))
 }
+
+/// One record of the fake DNS server's zone, by owner name.
+#[derive(Clone, Copy)]
+pub enum Rr {
+    A([u8; 4]),
+    Cname(&'static str),
+    /// The name answers NXDOMAIN.
+    NxDomain,
+    /// Queries for the name get no answer.
+    Silent,
+    /// The UDP answer has TC set and no records; TCP gets the name's other records.
+    Truncated,
+}
+
+/// A fake recursive DNS server on loopback (UDP and TCP, same port) serving `zone`. Answers
+/// follow CNAMEs within the zone, like a real resolver; the first owner name is compressed.
+pub async fn fake_dns(zone: Vec<(&'static str, Rr)>) -> SocketAddr {
+    let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = tcp.local_addr().unwrap();
+    let udp = UdpSocket::bind(addr).await.unwrap();
+    let zone = Arc::new(zone);
+    let z = zone.clone();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 512];
+        while let Ok((n, src)) = udp.recv_from(&mut buf).await {
+            if let Some(answer) = dns_answer(&z, &buf[..n], false) {
+                let _ = udp.send_to(&answer, src).await;
+            }
+        }
+    });
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = tcp.accept().await {
+            let zone = zone.clone();
+            tokio::spawn(async move {
+                let len = s.read_u16().await.unwrap() as usize;
+                let mut query = vec![0u8; len];
+                s.read_exact(&mut query).await.unwrap();
+                if let Some(answer) = dns_answer(&zone, &query, true) {
+                    s.write_u16(answer.len() as u16).await.unwrap();
+                    s.write_all(&answer).await.unwrap();
+                }
+            });
+        }
+    });
+    addr
+}
+
+fn dns_answer(zone: &[(&str, Rr)], query: &[u8], tcp: bool) -> Option<Vec<u8>> {
+    let mut pos = 12;
+    let mut labels = Vec::new();
+    while query[pos] != 0 {
+        let len = query[pos] as usize;
+        labels.push(std::str::from_utf8(&query[pos + 1..pos + 1 + len]).unwrap());
+        pos += 1 + len;
+    }
+    let question = &query[12..pos + 5];
+    let qname = labels.join(".").to_ascii_lowercase();
+    let has = |rr: fn(&Rr) -> bool| zone.iter().any(|(n, r)| *n == qname && rr(r));
+    if has(|r| matches!(r, Rr::Silent)) {
+        return None;
+    }
+    let (mut flags, mut answers, mut count) = ([0x81, 0x80], Vec::new(), 0u16);
+    if has(|r| matches!(r, Rr::NxDomain)) {
+        flags[1] |= 3;
+    } else if !tcp && has(|r| matches!(r, Rr::Truncated)) {
+        flags[0] |= 0x02;
+    } else {
+        let encode = |name: &str, out: &mut Vec<u8>| {
+            for l in name.split('.') {
+                out.push(l.len() as u8);
+                out.extend_from_slice(l.as_bytes());
+            }
+            out.push(0);
+        };
+        let mut name = qname.clone();
+        for hop in 0..16 {
+            let mut next = None;
+            for (_, rr) in zone.iter().filter(|(n, _)| *n == name) {
+                let (rtype, rdata) = match rr {
+                    Rr::A(ip) => (1u8, ip.to_vec()),
+                    Rr::Cname(target) => {
+                        next = Some(target.to_string());
+                        let mut rdata = Vec::new();
+                        encode(target, &mut rdata);
+                        (5, rdata)
+                    }
+                    _ => continue,
+                };
+                if hop == 0 {
+                    answers.extend_from_slice(&[0xc0, 12]);
+                } else {
+                    encode(&name, &mut answers);
+                }
+                answers.extend_from_slice(&[0, rtype, 0, 1, 0, 0, 0, 60]);
+                answers.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+                answers.extend_from_slice(&rdata);
+                count += 1;
+            }
+            match next {
+                Some(n) => name = n,
+                None => break,
+            }
+        }
+    }
+    let mut msg = query[..2].to_vec();
+    msg.extend_from_slice(&flags);
+    msg.extend_from_slice(&[0, 1]);
+    msg.extend_from_slice(&count.to_be_bytes());
+    msg.extend_from_slice(&[0, 0, 0, 0]);
+    msg.extend_from_slice(question);
+    msg.extend_from_slice(&answers);
+    Some(msg)
+}

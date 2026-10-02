@@ -30,6 +30,12 @@ idle_timeout = 300
 # Maximum concurrent client connections; extra clients are closed immediately. 0 = no limit.
 max_connections = 512
 
+# DNS server for domain destinations, as "ip:port".
+# It is asked for A records only (IPv4; CNAME chains are followed) over UDP, with a TCP
+# retry for truncated answers, within request_timeout. No cache. Its queries are never
+# marked. Absent = the system resolver (/etc/resolv.conf). Unused when dns_resolve = false.
+# dns = "127.0.0.1:5353"
+
 # --- Settings inherited from fast-socks5's server Config (same names) ---
 # Defaults match fast-socks5 except allow_udp and nodelay (both true here, false there).
 
@@ -40,8 +46,8 @@ request_timeout = 10
 # that send the request immediately). Cannot be combined with [auth].
 skip_auth = false
 
-# true = resolve domain destinations on the router (every resolved address is tried in
-# order). false = domain destinations are rejected with "address type not supported".
+# true = resolve domain destinations on the router, with `dns` or the system resolver
+# (every resolved address is tried in order). false = domain destinations are rejected with "address type not supported".
 dns_resolve = true
 
 # true = accept UDP ASSOCIATE. false = reply "command not supported".

@@ -14,8 +14,9 @@ feed on GitHub Releases ([install](#install-on-openwrt)).
   destination-facing sockets** are marked: outbound TCP connections and outbound UDP
   sockets. The mark is set before `connect()` or the first `send`. Every connection attempt
   to every resolved address is marked.
-- The listening socket, accepted client connections and the client-facing UDP relay socket
-  are **never** marked.
+- The listening socket, accepted client connections, the client-facing UDP relay socket
+  and the queries to the `dns` server are **never** marked. DNS goes to a local resolver,
+  not to a destination.
 - If the mark cannot be set, the request is **rejected**: a TCP `CONNECT` gets a SOCKS
   "general failure" reply, and a UDP datagram is dropped with a warning. Traffic is never
   sent unmarked. Setting a mark needs `CAP_NET_ADMIN`, or `CAP_NET_RAW` on Linux >= 5.17.
@@ -207,7 +208,7 @@ To pin a release instead of following `main`, pin the commit its tag points to.
 can. This replaces the `marksocks` line added above (a feed name may appear only once):
 
 ```sh
-v=0.0.1
+v=0.0.2
 sha=$(git ls-remote https://github.com/quer3q/marksocks.git "refs/tags/v$v" "refs/tags/v$v^{}" | tail -n1 | cut -f1)
 sed -i "s|^src-git marksocks .*|src-git marksocks https://github.com/quer3q/marksocks.git^$sha|" feeds.conf
 ./scripts/feeds update marksocks && ./scripts/feeds install marksocks
@@ -250,6 +251,7 @@ default, with comments.
 | `handshake_timeout` | `10` | Seconds a client has for negotiation, auth and its request. `0` = no limit. |
 | `idle_timeout` | `300` | Seconds without traffic in either direction before a TCP relay or UDP association is closed. `0` = no limit. |
 | `max_connections` | `512` | Concurrent client connections. Extra clients are closed at once. `0` = no limit. |
+| `dns` | absent (system resolver) | DNS server for domain destinations, `"ip:port"`, e.g. `"127.0.0.1:5353"`. Asked for A records only (CNAME chains are followed), over UDP with a TCP retry for truncated answers, within `request_timeout`. No cache. NXDOMAIN or no A record fails like an unknown host. Unused when `dns_resolve = false`. Use it when the system resolver returns addresses that must not be used here, e.g. passwall2 FakeDNS (`198.18.x`). |
 | `request_timeout` * | `10` | Seconds for DNS resolution plus all connection attempts to one destination. Must be >= 1. |
 | `skip_auth` * | `false` | Skip SOCKS5 method negotiation (not RFC compliant). Cannot be combined with `[auth]`. |
 | `dns_resolve` * | `true` | Resolve domain destinations on the router. `false` rejects them with "address type not supported" (TCP) or drops them (UDP). |
@@ -285,6 +287,15 @@ level). `service marksocks reload` restarts the instance only when the TOML file
 changed. While the service is registered with procd, a UCI change applied with
 `uci commit marksocks && reload_config` (or LuCI) reloads it too. A restart drops open
 connections. For connection logs, set `log_level = "info"`.
+
+### UDP reply addresses
+
+Each reply datagram's SOCKS header carries the address the client sent to, not only where
+the reply came from. If the client sent to a domain (`ATYP=3`), the reply carries the same
+name and port. Clients such as xray map replies back by that name, e.g. to a FakeDNS
+address. If the client sent to an IP, the reply carries the source IP. If several names
+the client used in one association resolve to the same address and port, replies carry
+the name used most recently.
 
 ## Enabling LAN access
 

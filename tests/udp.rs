@@ -118,9 +118,37 @@ async fn domain_destination_localhost() {
     let server = start(config()).await;
     let (_ctl, relay) = udp_associate(server.addr, any4()).await;
     let c = client().await;
-    match round_trip(&c, relay, domain("localhost", echo.port()), b"via dns").await {
-        TargetAddr::Ip(src) => assert!(src.ip().is_loopback() && src.port() == echo.port()),
-        other => panic!("reply source must be an IP, got {other}"),
+    // The reply header echoes the requested name (ATYP=3), not the address it resolved to.
+    let target = domain("localhost", echo.port());
+    assert_eq!(
+        round_trip(&c, relay, target.clone(), b"via dns").await,
+        target
+    );
+}
+
+#[tokio::test]
+async fn domain_reply_header_uses_the_most_recent_name_for_an_address() {
+    let (echo, _seen) = udp_echo("127.0.0.1:0").await.unwrap();
+    let server = start(marksocks::Config {
+        dns: Some(
+            fake_dns(vec![
+                ("one.test", Rr::A([127, 0, 0, 1])),
+                ("two.test", Rr::A([127, 0, 0, 1])),
+            ])
+            .await,
+        ),
+        ..config()
+    })
+    .await;
+    let (_ctl, relay) = udp_associate(server.addr, any4()).await;
+    let c = client().await;
+    for target in [
+        domain("one.test", echo.port()),
+        domain("two.test", echo.port()),
+        ip(echo),
+        domain("one.test", echo.port()),
+    ] {
+        assert_eq!(round_trip(&c, relay, target.clone(), b"x").await, target);
     }
 }
 

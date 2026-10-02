@@ -1,6 +1,6 @@
 [package]
 name = "marksocks"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 license = "MIT"
 description = "Small SOCKS5 proxy for OpenWrt that sets SO_MARK on destination-facing sockets"
