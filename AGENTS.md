@@ -20,11 +20,12 @@ shipped for OpenWrt as a signed apk feed on GitHub Releases. README.md is the us
 - `request_timeout`, `skip_auth`, `dns_resolve`, `allow_udp`, `allow_no_auth` and `nodelay`
   are inherited from fast-socks5's server config. `allow_udp` and `nodelay` default to true
   (the library defaults to false). See `config.example.toml`.
-- OpenWrt: the service runs through ujail as the package user `marksocks` (`USERID`, no
-  fixed ids) with `files/marksocks.capabilities` (CAP_NET_ADMIN, CAP_NET_BIND_SERVICE), like
-  sysntpd; root when ujail or the caps file is missing. `procd_add_jail` is required: procd
-  applies capabilities only via ujail. The init script makes the TOML group `marksocks`,
-  0640, before each start. postinst restarts an enabled service on `apk upgrade`.
+- OpenWrt: the service runs through ujail as the package user `marksocks`
+  (`USERID:=marksocks:marksocks`: no ids; `name=` with an empty id fails metadata.pm)
+  with `files/marksocks.capabilities` (CAP_NET_ADMIN, CAP_NET_BIND_SERVICE), like sysntpd;
+  root when ujail or the caps file is missing. `procd_add_jail` is required: procd applies
+  capabilities only via ujail. The init script makes the TOML group `marksocks`, 0640,
+  before each start. postinst restarts an enabled service on `apk upgrade`.
 - `log_level` defaults to `off`. The `fast_socks5` log target is capped at info, because it
   logs credentials at debug. Never log credentials or payloads.
 

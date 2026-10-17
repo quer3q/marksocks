@@ -61,7 +61,7 @@ define Package/marksocks
   URL:=https://github.com/quer3q/marksocks
   DEPENDS:=$(RUST_ARCH_DEPENDS)
   # No fixed ids: add_group_and_user (in the generated install scripts) picks free ones.
-  USERID:=marksocks=:marksocks=
+  USERID:=marksocks:marksocks
 endef
 
 define Package/marksocks/description

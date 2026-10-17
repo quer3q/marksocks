@@ -133,7 +133,9 @@ present (the default), procd runs the service through ujail as that user with on
 `CAP_NET_ADMIN` (`SO_MARK`) and `CAP_NET_BIND_SERVICE` (a `listen` port below 1024), like
 busybox `ntpd`; otherwise it runs as root. Before each start the init script makes the
 TOML file (whatever UCI `config_file` names) group `marksocks`, mode 0640, so that user can
-read it; it is never world-readable. `--check` still runs as root.
+read it; it is never world-readable. `--check` still runs as root. A `config_file` outside
+`/etc/marksocks` must sit in directories that user can enter (e.g. 0755), or the service
+fails to read it and procd keeps restarting it.
 
 The service is installed **disabled**. Edit `/etc/marksocks/config.toml`, then:
 
