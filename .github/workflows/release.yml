@@ -237,11 +237,21 @@ jobs:
           (umask 077 && printf '%s\n' "$APK_SIGNING_KEY" > private-key.pem)
           printf '%s\n' "$APK_PUBLIC_KEY" > marksocks.pem
           make package/index V=s
-          # The marksocks feed's index must list marksocks only, and verify with the
-          # published marksocks.pem alone (fails on a missing or foreign signature).
           d="bin/packages/$ARCH/marksocks"
           cat "$d/index.json"
           jq -e '.packages | keys == ["marksocks"]' "$d/index.json"
+          # The SDK's index names the package relative to the repository URL, and
+          # .../releases/latest/download/ is whatever release is Latest: an index cached
+          # before a newer release would 404. Rebuild it from the same .apk (the flags of
+          # package/Makefile's mkndx) with this release's absolute URL. The asset is
+          # marksocks-<ver>-r<rel>.apk, i.e. ${name}-${version}.apk.
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+          staging_dir/host/bin/apk mkndx --root "$PWD" --keys-dir "$PWD" --allow-untrusted \
+            --sign-key private-key.pem --pkgname-spec "$url/\${name}-\${version}.apk" \
+            --output "$d/packages.adb" "$d"/marksocks-*.apk
+          staging_dir/host/bin/apk adbdump "$d/packages.adb" | grep -F "$url/"
+          # The published index must verify with the published marksocks.pem alone (fails
+          # on a missing or foreign signature).
           mkdir -p /tmp/apk-keys && cp marksocks.pem /tmp/apk-keys/marksocks.pem
           staging_dir/host/bin/apk verify --keys-dir /tmp/apk-keys "$d/packages.adb"
       - name: Collect the package (and the signed index)

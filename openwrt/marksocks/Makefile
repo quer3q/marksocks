@@ -23,7 +23,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=marksocks
-PKG_VERSION:=0.0.3
+PKG_VERSION:=0.0.4
 PKG_RELEASE:=1
 
 # realpath: package/feeds/<feed>/marksocks is a symlink, and with a src-link feed so is
@@ -60,6 +60,8 @@ define Package/marksocks
   TITLE:=SOCKS5 proxy that can set SO_MARK on outbound sockets
   URL:=https://github.com/quer3q/marksocks
   DEPENDS:=$(RUST_ARCH_DEPENDS)
+  # No fixed ids: add_group_and_user (in the generated install scripts) picks free ones.
+  USERID:=marksocks=:marksocks=
 endef
 
 define Package/marksocks/description
@@ -74,7 +76,18 @@ define Package/marksocks/conffiles
 /etc/marksocks/config.toml
 endef
 
-# INSTALL_CONF installs with mode 0600: config.toml may hold [auth] credentials.
+# apk upgrade replaces the binary but not the running process. package-pack.mk appends this
+# to both post-install and post-upgrade; only post-upgrade sets PKG_UPGRADE=1, and $root is
+# set in the ImageBuilder rootfs. restart goes through start_service, so a disabled UCI
+# section or an invalid TOML still does not start it.
+define Package/marksocks/postinst
+#!/bin/sh
+[ -z "$${root}" ] && [ "$${PKG_UPGRADE}" = 1 ] && /etc/init.d/marksocks enabled && /etc/init.d/marksocks restart
+exit 0
+endef
+
+# INSTALL_CONF installs with mode 0600: config.toml may hold [auth] credentials. The init
+# script makes it group marksocks, 0640, when it runs the service as that user.
 define Package/marksocks/install
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/bin/marksocks $(1)/usr/bin/
@@ -84,6 +97,8 @@ define Package/marksocks/install
 	$(INSTALL_CONF) ./files/marksocks.config $(1)/etc/config/marksocks
 	$(INSTALL_DIR) $(1)/etc/marksocks
 	$(INSTALL_CONF) ./files/config.toml $(1)/etc/marksocks/config.toml
+	$(INSTALL_DIR) $(1)/etc/capabilities
+	$(INSTALL_DATA) ./files/marksocks.capabilities $(1)/etc/capabilities/marksocks.json
 endef
 
 # Copy the crate, never target/ or .git. PKG_VERSION must equal Cargo.toml's version

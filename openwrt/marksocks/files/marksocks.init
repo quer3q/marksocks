@@ -15,7 +15,7 @@ validate_marksocks_section() {
 }
 
 start_marksocks_instance() {
-	local section="$1" out
+	local section="$1" out jail=
 
 	[ "$2" = 0 ] || {
 		logger -t marksocks -p daemon.err "section '$section': invalid UCI settings, not starting"
@@ -30,6 +30,16 @@ start_marksocks_instance() {
 		return 1
 	}
 
+	# Like sysntpd: run as the marksocks user with only CAP_NET_ADMIN (SO_MARK) and
+	# CAP_NET_BIND_SERVICE (a listen port < 1024) when ujail is there, as root otherwise.
+	# That user must read the TOML, which may hold [auth]: group-readable, never world.
+	# Done here, not in postinst, so it covers any config_file and a restored or edited file.
+	[ -x /sbin/ujail ] && [ -e /etc/capabilities/marksocks.json ] && jail=1
+	[ -z "$jail" ] || { chgrp marksocks "$config_file" && chmod 0640 "$config_file"; } || {
+		logger -t marksocks -p daemon.err "not starting: cannot make $config_file readable by group marksocks"
+		return 1
+	}
+
 	procd_open_instance "$section"
 	procd_set_param command "$PROG" --config "$config_file"
 	# A changed TOML file makes `service marksocks reload` restart the instance.
@@ -40,6 +50,15 @@ start_marksocks_instance() {
 	# max_connections defaults to 512 and each relay holds 2+ fds.
 	procd_set_param limits nofile="4096 4096"
 	procd_set_param stderr 1
+	[ -z "$jail" ] || {
+		# procd applies capabilities only through ujail, which needs a jail object. With no
+		# jail flags or mounts, ujail makes no mount namespace: it only sets ids and caps.
+		procd_add_jail marksocks
+		procd_set_param capabilities /etc/capabilities/marksocks.json
+		procd_set_param user marksocks
+		procd_set_param group marksocks
+		procd_set_param no_new_privs 1
+	}
 	procd_close_instance
 }
 

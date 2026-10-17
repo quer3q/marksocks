@@ -20,7 +20,8 @@ feed on GitHub Releases ([install](#install-on-openwrt)).
 - If the mark cannot be set, the request is **rejected**: a TCP `CONNECT` gets a SOCKS
   "general failure" reply, and a UDP datagram is dropped with a warning. Traffic is never
   sent unmarked. Setting a mark needs `CAP_NET_ADMIN`, or `CAP_NET_RAW` on Linux >= 5.17.
-  On OpenWrt the service runs as root, which has both. On non-Linux builds marking always
+  On OpenWrt the service runs as the unprivileged `marksocks` user with only
+  `CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE` (see below). On non-Linux builds marking always
   fails.
 
 ## Build
@@ -107,11 +108,12 @@ How the trust works:
 
 Updates:
 
-- `apk update && apk upgrade marksocks` installs a newer release once it is the latest one.
-- apk fetches the package as `.../releases/latest/download/marksocks-<version>-r<n>.apk`,
-  relative to the repository URL. If a new release was published after your last
-  `apk update`, that name no longer exists in the latest release and the download fails.
-  Run `apk update` again.
+- `apk update && apk upgrade marksocks` installs a newer release once it is the latest one,
+  and restarts the service if it is enabled.
+- The index names its package by absolute URL
+  (`.../releases/download/v<version>/marksocks-<version>-r<n>.apk`), so an index cached
+  before a newer release still downloads (since 0.0.4; with an older cached index, run
+  `apk update` if the download fails).
 - To pin one release instead of following the latest, use
   `https://github.com/quer3q/marksocks/releases/download/v<version>/packages.adb` as the
   repository line.
@@ -121,9 +123,17 @@ The package installs:
 | Path | What |
 |---|---|
 | `/usr/bin/marksocks` | the binary |
-| `/etc/marksocks/config.toml` | runtime config (conffile, mode 0600) |
+| `/etc/marksocks/config.toml` | runtime config (conffile, mode 0600; 0640 group `marksocks` once the service starts) |
 | `/etc/config/marksocks` | UCI service section (conffile) |
 | `/etc/init.d/marksocks` | procd init script |
+| `/etc/capabilities/marksocks.json` | the service's capabilities |
+
+It also adds a `marksocks` user and group. When `/sbin/ujail` and the capabilities file are
+present (the default), procd runs the service through ujail as that user with only
+`CAP_NET_ADMIN` (`SO_MARK`) and `CAP_NET_BIND_SERVICE` (a `listen` port below 1024), like
+busybox `ntpd`; otherwise it runs as root. Before each start the init script makes the
+TOML file (whatever UCI `config_file` names) group `marksocks`, mode 0640, so that user can
+read it; it is never world-readable. `--check` still runs as root.
 
 The service is installed **disabled**. Edit `/etc/marksocks/config.toml`, then:
 
@@ -208,7 +218,7 @@ To pin a release instead of following `main`, pin the commit its tag points to.
 can. This replaces the `marksocks` line added above (a feed name may appear only once):
 
 ```sh
-v=0.0.3
+v=0.0.4
 sha=$(git ls-remote https://github.com/quer3q/marksocks.git "refs/tags/v$v" "refs/tags/v$v^{}" | tail -n1 | cut -f1)
 sed -i "s|^src-git marksocks .*|src-git marksocks https://github.com/quer3q/marksocks.git^$sha|" feeds.conf
 ./scripts/feeds update marksocks && ./scripts/feeds install marksocks
@@ -265,7 +275,8 @@ default, with comments.
 `execute_command` is not exposed, because a standalone proxy always executes commands.
 
 The binary does not check file permissions. **If you set `[auth]`, keep the file at mode
-0600** (`chmod 600 /etc/marksocks/config.toml`). The package installs it with that mode.
+0600** (`chmod 600 /etc/marksocks/config.toml`). The package installs it with that mode; the
+OpenWrt service then uses 0640 with group `marksocks` (see above), never world-readable.
 Credentials are never put on the command line.
 
 ### UCI (`/etc/config/marksocks`)
